@@ -1,0 +1,100 @@
+name: Build
+
+on:
+  push:
+    branches: ["main"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version (例: v2.0.3)"
+        required: false
+        default: "dev"
+
+jobs:
+  # ─────────────────────────────────────────
+  # Job 1: Rustオーバーレイをビルド
+  # ─────────────────────────────────────────
+  build-overlay:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Rustツールチェーンをセットアップ
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rustビルドキャッシュ
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: native/overlay -> target
+
+      - name: オーバーレイをビルド
+        run: |
+          cargo build `
+            --manifest-path native/overlay/Cargo.toml `
+            --locked `
+            --release `
+            --bin PuriPulyHeartOverlay `
+            --target-dir target
+
+      - name: build/overlay/ に成果物をステージング
+        run: |
+          New-Item -ItemType Directory -Force -Path build/overlay
+          Copy-Item target/release/PuriPulyHeartOverlay.exe build/overlay/
+          Copy-Item third_party/openvr/win64/openvr_api.dll build/overlay/
+
+      - name: overlayをartifactとして保存（次のJobへ渡す）
+        uses: actions/upload-artifact@v4
+        with:
+          name: overlay-staged
+          path: build/overlay/
+          retention-days: 1
+
+  # ─────────────────────────────────────────
+  # Job 2: Pythonアプリをビルド（overlay完成後）
+  # ─────────────────────────────────────────
+  build-python:
+    runs-on: windows-latest
+    needs: build-overlay
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Python 3.12をセットアップ
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: uvをインストール
+        uses: astral-sh/setup-uv@v5
+
+      - name: 依存関係をインストール（buildオプション含む）
+        run: uv sync --extra build
+
+      - name: overlayのビルド成果物をダウンロード
+        uses: actions/download-artifact@v4
+        with:
+          name: overlay-staged
+          path: build/overlay/
+
+      - name: soxrリリース入力を準備
+        run: pwsh -File scripts/ci/prepare-soxr-release-inputs.ps1
+
+      - name: PyInstallerでexeをビルド
+        run: uv run pyinstaller build.spec
+
+      - name: バージョン名を決定
+        id: version
+        run: |
+          if ("${{ github.event_name }}" -eq "workflow_dispatch") {
+            echo "tag=${{ github.event.inputs.version }}" >> $env:GITHUB_OUTPUT
+          } else {
+            $sha = "${{ github.sha }}".Substring(0, 7)
+            echo "tag=dev-$sha" >> $env:GITHUB_OUTPUT
+          }
+
+      - name: exeをartifactとして保存
+        uses: actions/upload-artifact@v4
+        with:
+          name: PuriPuly-${{ steps.version.outputs.tag }}-windows
+          path: dist/PuriPulyHeart/
+          retention-days: 30
